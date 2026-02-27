@@ -29,13 +29,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--artifact", required=True)
     parser.add_argument("--war-version", required=False, help="Optional. If omitted, the current WAR pom.xml <version> will be used and sanitized (-SNAPSHOT dropped)")
     parser.add_argument("--release", required=True)
-    parser.add_argument("--war-path", required=True, help="Path to WAR repo")
+    parser.add_argument("--war-path", required=False, help="Path to WAR repo (required unless --list-consumers is used)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     parser.add_argument("--timeout", type=int, default=900, help="Per-command timeout in seconds (default: 900)")
     parser.add_argument("--skip-pull", action="store_true", help="Skip 'git pull' and remote branch resets (use local state)")
     parser.add_argument("--sync-strategy", choices=["rebase", "merge"], default="rebase", help="How to sync with origin before release (default: rebase)")
     parser.add_argument("--rpm-war-version", required=False, help="Override WAR version to set in RPMs (defaults to released scm.tag or --war-version/derived)")
     parser.add_argument("--stop-after-war", action="store_true", help="Run WAR release only and stop before RPM updates")
+    parser.add_argument("--list-consumers", action="store_true", help="Only list RPM repositories that consume --artifact and exit")
     return parser.parse_args(argv)
 
 
@@ -49,6 +50,22 @@ def main(argv: list[str] | None = None) -> int:
     config = ToolConfig.load()
     workspace = ensure_workspace(config.workspace_dir)
 
+    # If the user only wants to list RPM consumers, do that first and exit
+    if args.list_consumers:
+        rpm_matches = search_rpm_repos(
+            artifact_id=args.artifact,
+            token=config.github_token,
+            org=config.github_org,
+            workspace=ensure_workspace(config.workspace_dir),
+            base_api_url=config.base_api_url,
+        )
+        print(f"Consumers of {args.artifact} (packaging=rpm): {len(rpm_matches)}")
+        for m in rpm_matches:
+            print(f"- {m.name}  ({m.ssh_url})")
+        return 0
+
+    if not args.war_path:
+        raise ValueError("--war-path is required unless --list-consumers is specified")
     war_repo = Path(args.war_path)
     if not war_repo.exists():
         raise FileNotFoundError(f"WAR repo not found at {war_repo}")
