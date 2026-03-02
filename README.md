@@ -66,6 +66,7 @@ Answer `yes` to continue or `no` to skip that repo’s release.
  - `--rpm-war-version`: Force a specific WAR version in RPM POMs (overrides the released tag detected from `release.properties`).
  - `--stop-after-war`: Run only the WAR release stage and exit (useful if you want to wait for artifact publication before running RPM updates later).
  - `--list-consumers`: List RPM repositories that consume `--artifact` and exit (no changes made).
+ - `--list-jar-consumers`: List both WAR and RPM repositories that consume the given JAR `--artifact` and exit (no changes made).
 
 ### Troubleshooting 401 Unauthorized from GitHub search
 - Ensure the PAT has the `repo` scope (this is required to search private code).
@@ -84,6 +85,21 @@ python -m release_tool.cli \
   --verbose
 ```
 This prints a count and the repo names with their SSH URLs. No branches are created and no changes are made in this mode. `--war-path` is not required for discovery.
+
+### List JAR consumers across WAR and RPM (discovery only)
+To see which WAR and RPM projects consume a given JAR artifactId in their pom.xml files, run:
+```
+python -m release_tool.cli \
+  --artifact <jar-artifactId> \
+  --release <release-number> \
+  --list-jar-consumers \
+  --verbose
+```
+This prints two sections:
+- WAR projects consuming <jar-artifactId>: N
+- RPM projects consuming <jar-artifactId>: M
+
+No branches are created and no changes are made in this mode. `--war-path` is not required for discovery.
 
 ### Releasing just the WAR first (then RPMs later)
 If your artifact repository publishes the WAR asynchronously, run the WAR stage only:

@@ -205,6 +205,7 @@ class RepoMatch:
     name: str
     ssh_url: str
     clone_path: Path
+    packaging: str | None = None
 
 
 def search_rpm_repos(artifact_id: str, token: str, org: str, workspace: Path, base_api_url: str) -> List[RepoMatch]:
@@ -232,5 +233,40 @@ def search_rpm_repos(artifact_id: str, token: str, org: str, workspace: Path, ba
                 full_name = f"{owner}/{name}"
             ssh_url = f"git@{host}:{full_name}.git"
         clone_path = workspace / name
-        matches.append(RepoMatch(name=name, ssh_url=ssh_url, clone_path=clone_path))
+        matches.append(RepoMatch(name=name, ssh_url=ssh_url, clone_path=clone_path, packaging="rpm"))
     return matches
+
+
+def search_consumers_by_packaging(
+    artifact_id: str,
+    token: str,
+    org: str,
+    base_api_url: str,
+    packaging: str,
+) -> List[RepoMatch]:
+    """Search code for pom.xml files that contain the artifact_id and match the given packaging (war/rpm)."""
+    query = f"org:{org} filename:pom.xml {artifact_id} packaging:{packaging}"
+    url = f"{base_api_url.rstrip('/')}/search/code?q={urllib.parse.quote(query)}"
+    req = urllib.request.Request(url, headers={"Authorization": f"token {token}"})
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as err:
+        raise RuntimeError(
+            f"GitHub search API failed with status {err.code}. Ensure your PAT has repo/code-search scopes."
+        ) from err
+    results: List[RepoMatch] = []
+    host = urllib.parse.urlparse(base_api_url).hostname or "github.com"
+    for item in data.get("items", []):
+        repo = item.get("repository", {})
+        name = repo.get("name") or item.get("name") or "unknown-repo"
+        ssh_url = repo.get("ssh_url")
+        full_name = repo.get("full_name")
+        if not ssh_url:
+            if not full_name:
+                owner = repo.get("owner", {}).get("login", org)
+                full_name = f"{owner}/{name}"
+            ssh_url = f"git@{host}:{full_name}.git"
+        # use a temp path; caller may not need clones
+        results.append(RepoMatch(name=name, ssh_url=ssh_url, clone_path=Path("/dev/null") / name, packaging=packaging))
+    return results

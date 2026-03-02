@@ -18,6 +18,7 @@ from .git_utils import (
     add_and_commit,
     sync_branch,
     tag_exists,
+    search_consumers_by_packaging,
 )
 from .pom_editor import has_snapshot_versions, update_dependency_version, list_snapshot_dependencies, drop_snapshot_versions, has_dependency_snapshots, get_project_version
 from typing import Optional
@@ -37,6 +38,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--rpm-war-version", required=False, help="Override WAR version to set in RPMs (defaults to released scm.tag or --war-version/derived)")
     parser.add_argument("--stop-after-war", action="store_true", help="Run WAR release only and stop before RPM updates")
     parser.add_argument("--list-consumers", action="store_true", help="Only list RPM repositories that consume --artifact and exit")
+    parser.add_argument("--list-jar-consumers", action="store_true", help="List both WAR and RPM repositories that consume a given JAR artifactId and exit")
     return parser.parse_args(argv)
 
 
@@ -61,6 +63,30 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Consumers of {args.artifact} (packaging=rpm): {len(rpm_matches)}")
         for m in rpm_matches:
+            print(f"- {m.name}  ({m.ssh_url})")
+        return 0
+
+    # List JAR consumers across WAR and RPM packagings
+    if args.list_jar_consumers:
+        wars = search_consumers_by_packaging(
+            artifact_id=args.artifact,
+            token=config.github_token,
+            org=config.github_org,
+            base_api_url=config.base_api_url,
+            packaging="war",
+        )
+        rpms = search_consumers_by_packaging(
+            artifact_id=args.artifact,
+            token=config.github_token,
+            org=config.github_org,
+            base_api_url=config.base_api_url,
+            packaging="rpm",
+        )
+        print(f"WAR projects consuming {args.artifact}: {len(wars)}")
+        for m in wars:
+            print(f"- {m.name}  ({m.ssh_url})")
+        print(f"\nRPM projects consuming {args.artifact}: {len(rpms)}")
+        for m in rpms:
             print(f"- {m.name}  ({m.ssh_url})")
         return 0
 
