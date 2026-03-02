@@ -35,7 +35,7 @@ You should get HTTP 200 with JSON results. If you see 401, re-check scopes and S
 ```
 python -m release_tool.cli \
   --artifact <artifactId> \
-  --war-version <version> \
+  [--war-version <version>] \
   --release <release-number> \
   --war-path /path/to/war/repo \
   [-v|--verbose]
@@ -56,12 +56,16 @@ Answer `yes` to continue or `no` to skip that repo’s release.
 
 ### Flag reference
 - `--artifact`: The WAR artifactId to update in RPM POMs (e.g., `mmf-cps-storage-content-app-spot-tomcat`).
-- `--war-version`: The released WAR version to propagate to RPM dependencies. Any `-SNAPSHOT` suffix will be dropped automatically when updating RPMs.
+- `--war-version`: Optional. If omitted, the tool derives the current `<version>` from the WAR pom.xml and drops `-SNAPSHOT` for the release. The WAR release is prepared with this exact version.
 - `--release`: A human-friendly release identifier used to create release branches, e.g., `release-3.15` in both the WAR and the RPM repos. This is not the WAR version; it’s just the branch naming token for this coordinated release (you can use formats like `3.15` or `2026.02.25`).
 - `--war-path`: Local filesystem path to the WAR repository checkout.
 - `--verbose`: Print detailed progress logs.
  - `--timeout`: Per-command timeout in seconds (default: 900). Applies to git and maven steps.
  - `--skip-pull`: Skip `git pull` and remote resets; operate only on the current local state.
+ - `--sync-strategy`: How to sync release branches with origin (`rebase` default, or `merge`).
+ - `--rpm-war-version`: Force a specific WAR version in RPM POMs (overrides the released tag detected from `release.properties`).
+ - `--stop-after-war`: Run only the WAR release stage and exit (useful if you want to wait for artifact publication before running RPM updates later).
+ - `--list-consumers`: List RPM repositories that consume `--artifact` and exit (no changes made).
 
 ### Troubleshooting 401 Unauthorized from GitHub search
 - Ensure the PAT has the `repo` scope (this is required to search private code).
@@ -69,6 +73,39 @@ Answer `yes` to continue or `no` to skip that repo’s release.
 - Confirm `github_org` in your config matches the org that hosts the RPM repos (e.g., `mmf-cps`).
 - Validate the token with curl (see above). Expect HTTP 200; HTTP 401 indicates bad/unauthorized token.
 - If still failing, regenerate a new PAT with `repo` scope and update your config file.
+
+### List RPM consumers (discovery only)
+To see which RPM repos (packaging=rpm) currently reference your WAR artifact in their pom.xml files, run:
+```
+python -m release_tool.cli \
+  --artifact <artifactId> \
+  --release <release-number> \
+  --list-consumers \
+  --verbose
+```
+This prints a count and the repo names with their SSH URLs. No branches are created and no changes are made in this mode. `--war-path` is not required for discovery.
+
+### Releasing just the WAR first (then RPMs later)
+If your artifact repository publishes the WAR asynchronously, run the WAR stage only:
+```
+python -m release_tool.cli \
+  --artifact <artifactId> \
+  --release <release-number> \
+  --war-path /path/to/war/repo \
+  --stop-after-war \
+  --verbose
+```
+Later, once the WAR version is available in your repos, rerun without `--stop-after-war` to update and release the RPMs. If needed, you can override the RPM dependency version with `--rpm-war-version <released-war-version>`.
+
+### Dynamic WAR version handling
+- If `--war-version` is omitted, the tool reads the current `pom.xml` version and strips `-SNAPSHOT` to compute the planned release version. It then calls Maven Release Plugin with `-DreleaseVersion=<planned>` and auto-bumps the next development `-SNAPSHOT` version.
+- The RPM step uses the released tag from `release.properties` (scm.tag) if present; otherwise it falls back to `--war-version` or the derived version. You can always force a specific version via `--rpm-war-version`.
+
+### lxml import error
+If you see `ModuleNotFoundError: No module named 'lxml'`, install it in your active virtualenv:
+```
+pip install lxml
+```
 
 ### What you’ll see during a run
 - WAR step: creates/uses `release-<release>` and runs the Maven release with streaming logs.
