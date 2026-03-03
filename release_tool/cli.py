@@ -19,6 +19,10 @@ from .git_utils import (
     sync_branch,
     tag_exists,
     search_consumers_by_packaging,
+    push_branch,
+    create_pull_request,
+    api_host_from_base_url,
+    create_pull_request_api,
 )
 from .pom_editor import has_snapshot_versions, update_dependency_version, list_snapshot_dependencies, drop_snapshot_versions, has_dependency_snapshots, get_project_version
 from typing import Optional
@@ -39,6 +43,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--stop-after-war", action="store_true", help="Run WAR release only and stop before RPM updates")
     parser.add_argument("--list-consumers", action="store_true", help="Only list RPM repositories that consume --artifact and exit")
     parser.add_argument("--list-jar-consumers", action="store_true", help="List both WAR and RPM repositories that consume a given JAR artifactId and exit")
+    parser.add_argument("--auto-pr", action="store_true", help="Create PRs automatically without prompting for approval")
+    parser.add_argument("--no-pr", action="store_true", help="Do not create PRs (overrides --auto-pr)")
     return parser.parse_args(argv)
 
 
@@ -129,20 +135,56 @@ def main(argv: list[str] | None = None) -> int:
     planned_release_version = (args.war_version or derived_war_version or "").replace("-SNAPSHOT", "")
     if not planned_release_version:
         raise RuntimeError("Unable to determine planned WAR release version from --war-version or pom.xml")
-    planned_dev_version = _bump_patch_snapshot(planned_release_version)
 
     # Avoid re-releasing the same tag if it already exists
     if tag_exists(war_repo, planned_release_version, timeout=args.timeout):
         logger.info("Tag %s already exists; skipping WAR release:prepare", planned_release_version)
     else:
-        logger.info("Running Maven release prepare for WAR repo with releaseVersion=%s developmentVersion=%s",
-                    planned_release_version, planned_dev_version)
+        logger.info("Running Maven release prepare for WAR repo with releaseVersion=%s",
+                    planned_release_version)
         mvn_release_prepare(
             war_repo,
             timeout=args.timeout,
             release_version=planned_release_version,
-            development_version=planned_dev_version,
+            development_version=None,
         )
+
+    # Optionally create a WAR PR with user approval
+    if not args.no_pr:
+        do_war_pr = args.auto_pr or confirm_pr_creation(f"Create PR for WAR {planned_release_version} on {war_branch}? (yes/no): ")
+        if do_war_pr:
+            try:
+                push_branch(war_repo, war_branch, set_upstream=True, timeout=args.timeout)
+            except Exception as e:
+                logger.warning("Unable to push branch %s for WAR repo: %s", war_branch, e)
+            pr_title = f"Release WAR {planned_release_version} ({war_branch})"
+            pr_body = (
+                f"Automated release preparation for WAR on branch {war_branch}.\n\n"
+                f"- Release version: {planned_release_version}\n"
+            )
+            # Prefer direct API to create PRs; fall back to gh if API fails
+            try:
+                pr_resp = create_pull_request_api(
+                    war_repo,
+                    head_branch=war_branch,
+                    base_branch="master",
+                    title=pr_title,
+                    body=pr_body,
+                    token=config.github_token,
+                    base_api_url=config.base_api_url,
+                    timeout=args.timeout,
+                )
+                logger.info("Created WAR PR via API: %s", pr_resp)
+            except Exception as e_api:
+                logger.warning("API PR creation failed for WAR, falling back to gh: %s", e_api)
+                try:
+                    host = api_host_from_base_url(config.base_api_url) or None
+                    pr_out = create_pull_request(war_repo, head_branch=war_branch, base_branch="master", title=pr_title, body=pr_body, host=host, timeout=args.timeout)
+                    logger.info("Created WAR PR via gh: %s", pr_out)
+                except Exception as e:
+                    logger.warning("Unable to create WAR PR via gh: %s", e)
+        else:
+            logger.info("User declined WAR PR creation; continuing without creating a PR for WAR")
 
     # Determine the released WAR version from release.properties (scm.tag)
     released_war_version = read_released_version(war_repo) or planned_release_version
@@ -207,6 +249,44 @@ def main(argv: list[str] | None = None) -> int:
                 logger.error("  - %s:%s:%s", gid, aid, ver)
             raise RuntimeError(f"{repo.name} still has -SNAPSHOT versions after update")
         require_clean_working_tree(repo.clone_path, timeout=args.timeout)
+        # Push release branch and raise PR for RPM (with user approval) before running its release
+        if not args.no_pr:
+            do_rpm_pr = args.auto_pr or confirm_pr_creation(
+                f"Create PR for {repo.name} updating {args.artifact} to {final_version} on {rpm_branch}? (yes/no): "
+            )
+            if do_rpm_pr:
+                try:
+                    push_branch(repo.clone_path, rpm_branch, set_upstream=True, timeout=args.timeout)
+                except Exception as e:
+                    logger.warning("Unable to push branch %s for %s: %s", rpm_branch, repo.name, e)
+                pr_title = f"Release RPM {repo.name}: update {args.artifact} to {final_version} ({rpm_branch})"
+                pr_body = (
+                    f"Automated release preparation for RPM on branch {rpm_branch}.\n\n"
+                    f"- Updated dependency: {args.artifact} -> {final_version}\n"
+                    f"- WAR release version: {released_war_version}\n"
+                )
+                try:
+                    pr_resp = create_pull_request_api(
+                        repo.clone_path,
+                        head_branch=rpm_branch,
+                        base_branch="master",
+                        title=pr_title,
+                        body=pr_body,
+                        token=config.github_token,
+                        base_api_url=config.base_api_url,
+                        timeout=args.timeout,
+                    )
+                    logger.info("Created RPM PR via API for %s: %s", repo.name, pr_resp)
+                except Exception as e_api:
+                    logger.warning("API PR creation failed for %s, falling back to gh: %s", repo.name, e_api)
+                    try:
+                        host = api_host_from_base_url(config.base_api_url) or None
+                        pr_out = create_pull_request(repo.clone_path, head_branch=rpm_branch, base_branch="master", title=pr_title, body=pr_body, host=host, timeout=args.timeout)
+                        logger.info("Created RPM PR via gh for %s: %s", repo.name, pr_out)
+                    except Exception as e:
+                        logger.warning("Unable to create RPM PR for %s via gh: %s", repo.name, e)
+            else:
+                logger.info("User declined PR creation for %s; continuing without creating a PR", repo.name)
         if not confirm_release(repo.name):
             logger.info("Skipping Maven release for %s per user request", repo.name)
             skipped.append(repo.name)
@@ -277,6 +357,16 @@ def _bump_patch_snapshot(version: str) -> str:
 def confirm_release(repo_name: str) -> bool:
     while True:
         response = input(f"Proceed with Maven release for {repo_name}? (yes/no): ").strip().lower()
+        if response in {"yes", "y"}:
+            return True
+        if response in {"no", "n"}:
+            return False
+        print("Please answer 'yes' or 'no'.")
+
+
+def confirm_pr_creation(prompt: str) -> bool:
+    while True:
+        response = input(prompt).strip().lower()
         if response in {"yes", "y"}:
             return True
         if response in {"no", "n"}:

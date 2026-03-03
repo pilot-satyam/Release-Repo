@@ -31,6 +31,24 @@ curl -H "Authorization: token <YOUR_TOKEN>" \
 ```
 You should get HTTP 200 with JSON results. If you see 401, re-check scopes and SSO authorization.
 
+### SSH-only environments (no HTTP Git)
+- This tool performs Git operations (clone/fetch/push) over SSH only. We derive SSH remotes from repository metadata (e.g., `git@github.cerner.com:org/repo.git`).
+- PRs are created using the GitHub CLI (`gh pr create`). While the Git API itself is HTTPS, your Git remotes remain SSH. Ensure `gh` is authenticated to your Enterprise host and set to use SSH for Git operations:
+  ```bash
+  gh auth login --hostname github.cerner.com --web
+  gh config set -h github.cerner.com git_protocol ssh
+  ```
+- If your local repo remotes are HTTP(S), update them to SSH to avoid HTTP Git usage:
+  ```bash
+  git remote set-url origin git@github.cerner.com:org/repo.git
+  ```
+  The tool will still function, but SSH remotes are recommended and expected in restricted environments.
+
+## Check cli parameters or helpers : 
+```
+python -m release_tool.cli --h
+```
+
 ## Usage
 ```
 python -m release_tool.cli \
@@ -67,6 +85,8 @@ Answer `yes` to continue or `no` to skip that repo’s release.
  - `--stop-after-war`: Run only the WAR release stage and exit (useful if you want to wait for artifact publication before running RPM updates later).
  - `--list-consumers`: List RPM repositories that consume `--artifact` and exit (no changes made).
  - `--list-jar-consumers`: List both WAR and RPM repositories that consume the given JAR `--artifact` and exit (no changes made).
+ - `--auto-pr`: Create PRs automatically without prompting (WAR and each RPM).
+ - `--no-pr`: Never create PRs (overrides `--auto-pr`).
 
 ### Troubleshooting 401 Unauthorized from GitHub search
 - Ensure the PAT has the `repo` scope (this is required to search private code).
@@ -112,6 +132,54 @@ python -m release_tool.cli \
   --verbose
 ```
 Later, once the WAR version is available in your repos, rerun without `--stop-after-war` to update and release the RPMs. If needed, you can override the RPM dependency version with `--rpm-war-version <released-war-version>`.
+
+### Pull request (PR) creation behavior
+By default, the tool prompts for approval before creating PRs:
+- WAR: "Create PR for WAR <version> on release-<release>? (yes/no)"
+- Each RPM: "Create PR for <rpm-repo> updating <artifact> to <version> on release-<release>? (yes/no)"
+
+Control flags:
+- Auto-create PRs without prompts:
+  ```
+  python -m release_tool.cli \
+    --artifact <artifactId> \
+    --release <release-number> \
+    --war-path /path/to/war/repo \
+    --auto-pr \
+    --verbose
+  ```
+- Disable PR creation entirely (WAR and RPM):
+  ```
+  python -m release_tool.cli \
+    --artifact <artifactId> \
+    --release <release-number> \
+    --war-path /path/to/war/repo \
+    --no-pr \
+    --verbose
+  ```
+- WAR-only with PR prompt (default):
+  ```
+  python -m release_tool.cli \
+    --artifact <artifactId> \
+    --release <release-number> \
+    --war-path /path/to/war/repo \
+    --stop-after-war \
+    --verbose
+  ```
+- WAR-only with no PRs:
+  ```
+  python -m release_tool.cli \
+    --artifact <artifactId> \
+    --release <release-number> \
+    --war-path /path/to/war/repo \
+    --stop-after-war \
+    --no-pr \
+    --verbose
+  ```
+
+Implementation details:
+- PRs are created via the GitHub REST API using your configured `github_token` and `base_api_url` (with automatic fallback to `gh pr create` if the API call fails).
+- Git operations (clone/fetch/push) remain SSH-only; only the PR creation uses HTTPS to the API.
 
 ### Dynamic WAR version handling
 - If `--war-version` is omitted, the tool reads the current `pom.xml` version and strips `-SNAPSHOT` to compute the planned release version. It then calls Maven Release Plugin with `-DreleaseVersion=<planned>` and auto-bumps the next development `-SNAPSHOT` version.
