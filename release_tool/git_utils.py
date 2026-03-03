@@ -13,6 +13,7 @@ from typing import List
 import urllib.error
 import urllib.request
 import urllib.parse
+import os as _os
 
 
 class CommandError(RuntimeError):
@@ -198,6 +199,125 @@ def tag_exists(repo: Path, tag: str, timeout: int | None = None) -> bool:
         return bool(remote.strip())
     except CommandError:
         return False
+
+
+def create_pull_request(
+    repo: Path,
+    head_branch: str,
+    base_branch: str = "master",
+    title: str | None = None,
+    body: str | None = None,
+    host: str | None = None,
+    timeout: int | None = None,
+) -> str:
+    """Create a PR using GitHub CLI (gh). Returns stdout or raises CommandError.
+
+    Requires 'gh' to be installed and authenticated. If using GitHub Enterprise,
+    passing host (e.g., github.cerner.com) may help; otherwise gh will infer from git remote.
+    """
+    cmd = [
+        "gh", "pr", "create",
+        "--base", base_branch,
+        "--head", head_branch,
+    ]
+    if title:
+        cmd += ["--title", title]
+    if body:
+        cmd += ["--body", body]
+
+    env = None
+    if host:
+        env = dict(_os.environ)
+        env["GH_HOST"] = host
+    try:
+        # Stream output so user can see URL if printed
+        proc = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        raise CommandError(cmd, -1, "gh pr create timed out")
+    if proc.returncode != 0:
+        raise CommandError(cmd, proc.returncode, proc.stdout + proc.stderr)
+    return proc.stdout.strip()
+
+
+def push_branch(repo: Path, branch: str, set_upstream: bool = True, timeout: int | None = None) -> None:
+    args = ["git", "-C", str(repo), "push", "origin", branch]
+    if set_upstream:
+        args = ["git", "-C", str(repo), "push", "-u", "origin", branch]
+    run(args, timeout=timeout)
+
+
+def api_host_from_base_url(base_api_url: str) -> str | None:
+    try:
+        return urllib.parse.urlparse(base_api_url).hostname
+    except Exception:
+        return None
+
+
+def get_owner_repo(repo: Path, timeout: int | None = None) -> tuple[str, str]:
+    """Return (owner, repo_name) for the current repository's origin remote."""
+    remote = run(["git", "-C", str(repo), "remote", "get-url", "origin"], timeout=timeout)
+    remote = remote.strip()
+    # SSH: git@host:owner/repo.git
+    if remote.startswith("git@") and ":" in remote:
+        path = remote.split(":", 1)[1]
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = path.split("/")
+        if len(parts) >= 2:
+            return parts[-2], parts[-1]
+    # HTTPS: https://host/owner/repo.git
+    try:
+        parsed = urllib.parse.urlparse(remote)
+        path = parsed.path.lstrip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        parts = path.split("/")
+        if len(parts) >= 2:
+            return parts[-2], parts[-1]
+    except Exception:
+        pass
+    raise RuntimeError(f"Unable to determine owner/repo from remote URL: {remote}")
+
+
+def create_pull_request_api(
+    repo: Path,
+    head_branch: str,
+    base_branch: str,
+    title: str,
+    body: str | None,
+    token: str,
+    base_api_url: str,
+    timeout: int | None = None,
+) -> str:
+    """Create a pull request via GitHub REST API v3 for the repository at 'repo'.
+
+    Returns the API response text (typically contains PR data).
+    """
+    owner, name = get_owner_repo(repo, timeout=timeout)
+    url = f"{base_api_url.rstrip('/')}/repos/{owner}/{name}/pulls"
+    payload = {
+        "title": title,
+        "head": head_branch,
+        "base": base_branch,
+        "body": body or "",
+        "maintainer_can_modify": True,
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout or 60) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as err:
+        raise RuntimeError(f"GitHub PR API failed ({err.code}): {err.read().decode('utf-8', 'ignore')}") from err
 
 
 @dataclass

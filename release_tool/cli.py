@@ -19,6 +19,10 @@ from .git_utils import (
     sync_branch,
     tag_exists,
     search_consumers_by_packaging,
+    push_branch,
+    create_pull_request,
+    api_host_from_base_url,
+    create_pull_request_api,
 )
 from .pom_editor import has_snapshot_versions, update_dependency_version, list_snapshot_dependencies, drop_snapshot_versions, has_dependency_snapshots, get_project_version
 from typing import Optional
@@ -144,6 +148,39 @@ def main(argv: list[str] | None = None) -> int:
             development_version=planned_dev_version,
         )
 
+    # Ensure branch is pushed and raise a PR for WAR before proceeding
+    try:
+        push_branch(war_repo, war_branch, set_upstream=True, timeout=args.timeout)
+    except Exception as e:
+        logger.warning("Unable to push branch %s for WAR repo: %s", war_branch, e)
+    pr_title = f"Release WAR {planned_release_version} ({war_branch})"
+    pr_body = (
+        f"Automated release preparation for WAR on branch {war_branch}.\n\n"
+        f"- Release version: {planned_release_version}\n"
+        f"- Next development version: {planned_dev_version}\n"
+    )
+    # Prefer direct API to create PRs; fall back to gh if API fails
+    try:
+        pr_resp = create_pull_request_api(
+            war_repo,
+            head_branch=war_branch,
+            base_branch="master",
+            title=pr_title,
+            body=pr_body,
+            token=config.github_token,
+            base_api_url=config.base_api_url,
+            timeout=args.timeout,
+        )
+        logger.info("Created WAR PR via API: %s", pr_resp)
+    except Exception as e_api:
+        logger.warning("API PR creation failed for WAR, falling back to gh: %s", e_api)
+        try:
+            host = api_host_from_base_url(config.base_api_url) or None
+            pr_out = create_pull_request(war_repo, head_branch=war_branch, base_branch="master", title=pr_title, body=pr_body, host=host, timeout=args.timeout)
+            logger.info("Created WAR PR via gh: %s", pr_out)
+        except Exception as e:
+            logger.warning("Unable to create WAR PR via gh: %s", e)
+
     # Determine the released WAR version from release.properties (scm.tag)
     released_war_version = read_released_version(war_repo) or planned_release_version
     if released_war_version:
@@ -207,6 +244,37 @@ def main(argv: list[str] | None = None) -> int:
                 logger.error("  - %s:%s:%s", gid, aid, ver)
             raise RuntimeError(f"{repo.name} still has -SNAPSHOT versions after update")
         require_clean_working_tree(repo.clone_path, timeout=args.timeout)
+        # Push release branch and raise PR for RPM before running its release
+        try:
+            push_branch(repo.clone_path, rpm_branch, set_upstream=True, timeout=args.timeout)
+        except Exception as e:
+            logger.warning("Unable to push branch %s for %s: %s", rpm_branch, repo.name, e)
+        pr_title = f"Release RPM {repo.name}: update {args.artifact} to {final_version} ({rpm_branch})"
+        pr_body = (
+            f"Automated release preparation for RPM on branch {rpm_branch}.\n\n"
+            f"- Updated dependency: {args.artifact} -> {final_version}\n"
+            f"- WAR release version: {released_war_version}\n"
+        )
+        try:
+            pr_resp = create_pull_request_api(
+                repo.clone_path,
+                head_branch=rpm_branch,
+                base_branch="master",
+                title=pr_title,
+                body=pr_body,
+                token=config.github_token,
+                base_api_url=config.base_api_url,
+                timeout=args.timeout,
+            )
+            logger.info("Created RPM PR via API for %s: %s", repo.name, pr_resp)
+        except Exception as e_api:
+            logger.warning("API PR creation failed for %s, falling back to gh: %s", repo.name, e_api)
+            try:
+                host = api_host_from_base_url(config.base_api_url) or None
+                pr_out = create_pull_request(repo.clone_path, head_branch=rpm_branch, base_branch="master", title=pr_title, body=pr_body, host=host, timeout=args.timeout)
+                logger.info("Created RPM PR via gh for %s: %s", repo.name, pr_out)
+            except Exception as e:
+                logger.warning("Unable to create RPM PR for %s via gh: %s", repo.name, e)
         if not confirm_release(repo.name):
             logger.info("Skipping Maven release for %s per user request", repo.name)
             skipped.append(repo.name)
