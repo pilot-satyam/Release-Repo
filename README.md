@@ -31,6 +31,19 @@ curl -H "Authorization: token <YOUR_TOKEN>" \
 ```
 You should get HTTP 200 with JSON results. If you see 401, re-check scopes and SSO authorization.
 
+### SSH-only environments (no HTTP Git)
+- This tool performs Git operations (clone/fetch/push) over SSH only. We derive SSH remotes from repository metadata (e.g., `git@github.cerner.com:org/repo.git`).
+- PRs are created using the GitHub CLI (`gh pr create`). While the Git API itself is HTTPS, your Git remotes remain SSH. Ensure `gh` is authenticated to your Enterprise host and set to use SSH for Git operations:
+  ```bash
+  gh auth login --hostname github.cerner.com --web
+  gh config set -h github.cerner.com git_protocol ssh
+  ```
+- If your local repo remotes are HTTP(S), update them to SSH to avoid HTTP Git usage:
+  ```bash
+  git remote set-url origin git@github.cerner.com:org/repo.git
+  ```
+  The tool will still function, but SSH remotes are recommended and expected in restricted environments.
+
 ## Usage
 ```
 python -m release_tool.cli \
